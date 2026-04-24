@@ -20,6 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'box_seeker = ros2_project_sc23gs.box_seeker:main',
             'first_step = ros2_project_sc23gs.first_step:main',
             'second_step = ros2_project_sc23gs.second_step:main',
             'third_step = ros2_project_sc23gs.third_step:main',
