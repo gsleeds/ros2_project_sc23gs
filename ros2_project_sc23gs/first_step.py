@@ -1,61 +1,53 @@
-# Exercise 1 - Display an image of the camera feed to the screen
+"""Exercise 1: display the camera feed in an OpenCV window."""
 
-#from __future__ import division
-import threading
-import sys, time
 import cv2
-import numpy as np
 import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import Twist, Vector3
-from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
-from rclpy.exceptions import ROSInterruptException
-import signal
+from rclpy.node import Node
+from sensor_msgs.msg import Image
 
 
-class colourIdentifier(Node):
-    def __init__(self):
-        super().__init__('cI')
-        
-        # Remember to initialise a CvBridge() and set up a subscriber to the image topic you wish to use
-        # We covered which topic to subscribe to should you wish to receive image data
+class CameraViewer(Node):
+    """Subscribe to the robot camera and display the live feed."""
 
-        self.subscription  # prevent unused variable warning
-        
-    def callback(self, data):
-        return
-        # Convert the received image into a opencv image
-        # But remember that you should always wrap a call to this conversion method in an exception handler
-        # Show the resultant images you have created.
-        
+    def __init__(self) -> None:
+        super().__init__('camera_viewer')
+        self.bridge = CvBridge()
+        self.subscription = self.create_subscription(
+            Image,
+            '/camera/image_raw',
+            self.callback,
+            10,
+        )
 
-# Create a node of your class in the main and ensure it stays up and running
-# handling exceptions and such
-def main():
+    def callback(self, data: Image) -> None:
+        """Convert ROS images to OpenCV and show them."""
+        try:
+            image = self.bridge.imgmsg_to_cv2(data, desired_encoding='bgr8')
+        except CvBridgeError as error:
+            self.get_logger().error(f'Failed to convert image: {error}')
+            return
 
-    def signal_handler(sig, frame):
-        rclpy.shutdown()
-    # Instantiate your class
-    # And rclpy.init the entire node
-    rclpy.init(args=None)
-    cI = colourIdentifier()
+        cv2.namedWindow('camera_feed', cv2.WINDOW_NORMAL)
+        cv2.imshow('camera_feed', image)
+        cv2.resizeWindow('camera_feed', 640, 480)
+        cv2.waitKey(1)
 
 
-    signal.signal(signal.SIGINT, signal_handler)
-    thread = threading.Thread(target=rclpy.spin, args=(cI,), daemon=True)
-    thread.start()
+def main(args=None) -> None:
+    """Run the camera viewer node until interrupted."""
+    rclpy.init(args=args)
+    node = CameraViewer()
 
     try:
-        while rclpy.ok():
-            continue
-    except ROSInterruptException:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
         pass
+    finally:
+        node.destroy_node()
+        cv2.destroyAllWindows()
+        rclpy.shutdown()
 
-    # Remember to destroy all image windows before closing node
-    cv2.destroyAllWindows()
-    
 
-# Check if the node is executing in the main path
 if __name__ == '__main__':
     main()

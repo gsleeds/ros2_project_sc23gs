@@ -1,170 +1,151 @@
-# Exercise 4 - following a colour (green) and stopping upon sight of another (blue).
+"""Exercise 4: follow green and stop when blue is visible."""
 
-#from __future__ import division
-import threading
-import sys, time
 import cv2
 import numpy as np
 import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import Twist, Vector3
-from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
-from rclpy.exceptions import ROSInterruptException
-import signal
+from geometry_msgs.msg import Twist
+from rclpy.node import Node
+from sensor_msgs.msg import Image
 
 
 class Robot(Node):
-    def __init__(self):
-        super().__init__('robot')
-        
-        # Initialise a publisher to publish messages to the robot base
-        # We covered which topic receives messages that move the robot in the 3rd Lab Session
+    """Use colour detection to follow green and stop for blue."""
 
-
-        # Initialise any flags that signal a colour has been detected (default to false)
-
-
-        # Initialise the value you wish to use for sensitivity in the colour detection (10 should be enough)
-
-
-        # Initialise some standard movement messages such as a simple move forward and a message with all zeroes (stop)
-
-        # Remember to initialise a CvBridge() and set up a subscriber to the image topic you wish to use
+    def __init__(self) -> None:
+        super().__init__('colour_following_robot')
+        self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
         self.bridge = CvBridge()
-        self.subscription = self.create_subscription(Image, '/camera/image_raw', self.callback, 10)
-        self.subscription  # prevent unused variable warning
+        self.sensitivity = 10
+        self.detect_area_threshold = 1200.0
+        self.target_area = 12000.0
+        self.close_area = 22000.0
+        self.current_twist = Twist()
 
-        # We covered which topic to subscribe to should you wish to receive image data
+        self.subscription = self.create_subscription(
+            Image,
+            '/camera/image_raw',
+            self.callback,
+            10,
+        )
+        self.publish_timer = self.create_timer(0.1, self.publish_velocity)
 
-    def callback(self, data):
+    def callback(self, data: Image) -> None:
+        """Update the robot command based on the latest camera frame."""
+        try:
+            image = self.bridge.imgmsg_to_cv2(data, desired_encoding='bgr8')
+        except CvBridgeError as error:
+            self.get_logger().error(f'Failed to convert image: {error}')
+            return
 
-        # Convert the received image into a opencv image
-        # But remember that you should always wrap a call to this conversion method in an exception handler
-        image = self.bridge.imgmsg_to_cv2(data, 'bgr8')
-        cv2.namedWindow('camera_Feed',cv2.WINDOW_NORMAL)
-        cv2.imshow('camera_Feed', image)
-        cv2.resizeWindow('camera_Feed',320,240)
-        cv2.waitKey(3)
-        
+        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        hsv_green_lower = np.array([60 - self.sensitivity, 100, 100])
+        hsv_green_upper = np.array([60 + self.sensitivity, 255, 255])
+        hsv_blue_lower = np.array([120 - self.sensitivity, 100, 100])
+        hsv_blue_upper = np.array([120 + self.sensitivity, 255, 255])
 
-        # Set the upper and lower bounds for the two colours you wish to identify
-        #hue value = 0 to 179
-        
-        #hsv_colour1_lower = np.array([<Hue value> - self.sensitivity, 100, 100])
-        #hsv_colour1_upper = np.array([<Hue value> + self.sensitivity, 255, 255])
-        
-        #hsv_colour2_lower = np.array([<Hue value> - self.sensitivity, 100, 100])
-        #hsv_colour2_upper = np.array([<Hue value> + self.sensitivity, 255, 255])
+        green_mask = cv2.inRange(hsv_image, hsv_green_lower, hsv_green_upper)
+        blue_mask = cv2.inRange(hsv_image, hsv_blue_lower, hsv_blue_upper)
 
-        # Convert the rgb image into a hsv image
-        Hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        green_contours, _ = cv2.findContours(
+            green_mask,
+            cv2.RETR_LIST,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        blue_contours, _ = cv2.findContours(
+            blue_mask,
+            cv2.RETR_LIST,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
 
-        # Filter out everything but a particular colour using the cv2.inRange() method
+        blue_area = 0.0
+        if blue_contours:
+            blue_area = cv2.contourArea(max(blue_contours, key=cv2.contourArea))
+
+        command = Twist()
+        status = 'Searching for green target'
+
+        if blue_area > self.detect_area_threshold:
+            status = 'Blue detected: stopping'
+        elif green_contours:
+            contour = max(green_contours, key=cv2.contourArea)
+            green_area = cv2.contourArea(contour)
+
+            if green_area > self.detect_area_threshold:
+                moments = cv2.moments(contour)
+                if moments['m00'] != 0:
+                    center_x = int(moments['m10'] / moments['m00'])
+                    image_center_x = image.shape[1] // 2
+                    error = center_x - image_center_x
+
+                    command.angular.z = float(-0.0025 * error)
+                    command.angular.z = max(min(command.angular.z, 0.8), -0.8)
+
+                    if green_area > self.close_area:
+                        command.linear.x = -0.05
+                        status = 'Green detected: backing away'
+                    elif green_area < self.target_area:
+                        command.linear.x = 0.08
+                        status = 'Green detected: moving forward'
+                    else:
+                        status = 'Green detected: holding distance'
+
+                    (circle_x, circle_y), radius = cv2.minEnclosingCircle(contour)
+                    cv2.circle(
+                        image,
+                        (int(circle_x), int(circle_y)),
+                        int(radius),
+                        (0, 255, 0),
+                        2,
+                    )
+                    cv2.circle(image, (center_x, int(circle_y)), 5, (0, 0, 255), -1)
+
+        self.current_twist = command
+        cv2.putText(
+            image,
+            status,
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2,
+        )
+        cv2.namedWindow('camera_feed', cv2.WINDOW_NORMAL)
+        cv2.namedWindow('green_mask', cv2.WINDOW_NORMAL)
+        cv2.namedWindow('blue_mask', cv2.WINDOW_NORMAL)
+        cv2.imshow('camera_feed', image)
+        cv2.imshow('green_mask', green_mask)
+        cv2.imshow('blue_mask', blue_mask)
+        cv2.resizeWindow('camera_feed', 640, 480)
+        cv2.resizeWindow('green_mask', 640, 480)
+        cv2.resizeWindow('blue_mask', 640, 480)
+        cv2.waitKey(1)
+
+    def publish_velocity(self) -> None:
+        """Publish the latest velocity command."""
+        self.publisher.publish(self.current_twist)
+
+    def stop(self) -> None:
+        """Stop the robot immediately."""
+        self.current_twist = Twist()
+        self.publisher.publish(self.current_twist)
 
 
-        # Apply the mask to the original image using the cv2.bitwise_and() method
-        # As mentioned on the worksheet the best way to do this is to bitwise and an image with itself and pass the mask to the mask parameter
-
-
-        # Find the contours that appear within the certain colour mask using the cv2.findContours() method
-        # For <mode> use cv2.RETR_LIST for <method> use cv2.CHAIN_APPROX_SIMPLE
-
-        # Loop over the contours
-        if len(contours)>0:
-
-            # There are a few different methods for identifying which contour is the biggest
-            # Loop through the list and keep track of which contour is biggest or
-            # Use the max() method to find the largest contour
-            
-            c = max(contours, key=cv2.contourArea)
-
-
-            #Check if the area of the shape you want is big enough to be considered
-            # If it is then change the flag for that colour to be True(1)
-            if cv2.contourArea(c) > x: #<What do you think is a suitable area?>
-                # Alter the value of the flag
-                myColourFlag = True
-
-        #Check if a flag has been set = colour object detected - follow the colour object
-        if self.colour1_flag == 1:
-            if cv2.contourArea(c) > aValue:
-                # Too close to object, need to move backwards
-                # Set a flag to tell the robot to move backwards when in the main loop
-                moveBackwardsFlag = True
-                
-            elif cv2.contourArea(c) < aValue:
-                # Too far away from object, need to move forwards
-                # Set a flag to tell the robot to move forwards when in the main loop
-                moveForwardsFlag = True
-            #else:
-                
-
-            # Be sure to do this for the other colour as well
-            # Setting the flag to detect blue, and stop the turtlebot from moving if blue is detected
-
-
-
-        # Show the resultant images you have created. You can show all of them or just the end result if you wish to.
-
-    def walk_forward(self):
-        #Use what you learnt in lab 3 to make the robot move forwards
-        desired_velocity = Twist()
-
-
-        for _ in range(30):  # Stop for a brief moment
-            self.publisher.publish(desired_velocity)
-            self.rate.sleep()
-
-    def walk_backward(self):
-        # Use what you learnt in lab 3 to make the robot move backwards
-        desired_velocity = Twist()
-
-
-        for _ in range(30):  # Stop for a brief moment
-            self.publisher.publish(desired_velocity)
-            self.rate.sleep()
-
-    def stop(self):
-        # Use what you learnt in lab 3 to make the robot stop
-        desired_velocity = Twist()
-
-
-        self.publisher.publish(desired_velocity)
-
-# Create a node of your class in the main and ensure it stays up and running
-# handling exceptions and such
-def main():
-    def signal_handler(sig, frame):
-        robot.stop()
-        rclpy.shutdown()
-
-    # Instantiate your class
-    # And rclpy.init the entire node
-    rclpy.init(args=None)
+def main(args=None) -> None:
+    """Run the colour-following node until interrupted."""
+    rclpy.init(args=args)
     robot = Robot()
-    
-
-
-    signal.signal(signal.SIGINT, signal_handler)
-    thread = threading.Thread(target=rclpy.spin, args=(robot,), daemon=True)
-    thread.start()
 
     try:
-        while rclpy.ok():
-            # Publish moves
-            #if found green:
-            #    if robot is too close:
-            #        move robot backward()
-            #    else:
-            #        robot walk forward()
-            pass
-
-    except ROSInterruptException:
+        rclpy.spin(robot)
+    except KeyboardInterrupt:
         pass
+    finally:
+        robot.stop()
+        robot.destroy_node()
+        cv2.destroyAllWindows()
+        rclpy.shutdown()
 
-    # Remember to destroy all image windows before closing node
-    cv2.destroyAllWindows()
 
 if __name__ == '__main__':
     main()
